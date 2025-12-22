@@ -1,0 +1,42 @@
+services:
+  # Backend API
+  - type: web
+    name: photoproof-api
+    env: node
+    buildCommand: cd server && npm install
+    startCommand: cd server && node index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DATABASE_PATH
+        value: ./database/proofing.db
+      - key: UPLOAD_DIR
+        value: ./uploads
+      - key: MAX_FILE_SIZE
+        value: 50000000
+      - key: FRONTEND_URL
+        fromService:
+          type: web
+          name: photoproof-client
+          property: host
+      - key: PORT
+        value: 10000
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/database
+      sizeGB: 1
+
+  # Frontend
+  - type: web
+    name: photoproof-client
+    env: static
+    buildCommand: cd client && npm install && npm run build
+    staticPublishPath: client/dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: photoproof-api
+          property: host
