@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Database
+database/*.db
+database/*.db-wal
+database/*.db-shm
+
+# Uploads (keep structure, ignore files)
+uploads/originals/*
+uploads/thumbnails/*
+uploads/watermarked/*
+!uploads/originals/.gitkeep
+!uploads/thumbnails/.gitkeep
+!uploads/watermarked/.gitkeep
+
+# Build output
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Temporary files
+*.tmp
+*.temp
