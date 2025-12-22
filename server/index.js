@@ -89,6 +89,16 @@ app.use('/api/photos', photoRoutes);
 app.use('/api/selections', selectionRoutes);
 app.use('/api/client', clientRoutes);
 
+// Serve frontend in production
+if (process.env.NODE_ENV === 'production') {
+    const clientDistPath = path.join(__dirname, '..', 'client', 'dist');
+    app.use(express.static(clientDistPath));
+
+    app.get('*', (req, res) => {
+        res.sendFile(path.join(clientDistPath, 'index.html'));
+    });
+}
+
 // Health check
 app.get('/api/health', (req, res) => {
     res.json({
