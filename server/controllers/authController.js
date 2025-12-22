@@ -13,15 +13,15 @@ export const register = async (req, res) => {
             return res.status(400).json({ error: 'Email, password, and name are required' });
         }
 
-        const existingUser = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+        const existingUser = await db.get('SELECT id FROM users WHERE email = ?', [email]);
         if (existingUser) {
             return res.status(400).json({ error: 'Email already registered' });
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
-        const result = db.prepare(`
+        const result = await db.run(`
       INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)
-    `).run(email, hashedPassword, name, role);
+    `, [email, hashedPassword, name, role]);
 
         const token = jwt.sign(
             { id: result.lastInsertRowid, email, role, name },
@@ -49,7 +49,7 @@ export const login = async (req, res) => {
             return res.status(400).json({ error: 'Email and password are required' });
         }
 
-        const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+        const user = await db.get('SELECT * FROM users WHERE email = ?', [email]);
         if (!user) {
             return res.status(401).json({ error: 'Invalid credentials' });
         }
@@ -82,12 +82,17 @@ export const verify = (req, res) => {
 };
 
 // Get current user
-export const me = (req, res) => {
-    const user = db.prepare('SELECT id, email, name, role, avatar, created_at FROM users WHERE id = ?').get(req.user.id);
-    if (!user) {
-        return res.status(404).json({ error: 'User not found' });
+export const me = async (req, res) => {
+    try {
+        const user = await db.get('SELECT id, email, name, role, avatar, created_at FROM users WHERE id = ?', [req.user.id]);
+        if (!user) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        res.json({ user });
+    } catch (error) {
+        console.error('Me error:', error);
+        res.status(500).json({ error: 'Failed to fetch user' });
     }
-    res.json({ user });
 };
 
 // Update profile
@@ -95,10 +100,9 @@ export const updateProfile = async (req, res) => {
     try {
         const { name, avatar } = req.body;
 
-        db.prepare('UPDATE users SET name = COALESCE(?, name), avatar = COALESCE(?, avatar) WHERE id = ?')
-            .run(name, avatar, req.user.id);
+        await db.run('UPDATE users SET name = COALESCE(?, name), avatar = COALESCE(?, avatar) WHERE id = ?', [name, avatar, req.user.id]);
 
-        const user = db.prepare('SELECT id, email, name, role, avatar FROM users WHERE id = ?').get(req.user.id);
+        const user = await db.get('SELECT id, email, name, role, avatar FROM users WHERE id = ?', [req.user.id]);
         res.json({ message: 'Profile updated', user });
     } catch (error) {
         console.error('Update profile error:', error);
@@ -111,7 +115,7 @@ export const changePassword = async (req, res) => {
     try {
         const { currentPassword, newPassword } = req.body;
 
-        const user = db.prepare('SELECT password FROM users WHERE id = ?').get(req.user.id);
+        const user = await db.get('SELECT password FROM users WHERE id = ?', [req.user.id]);
         const validPassword = await bcrypt.compare(currentPassword, user.password);
 
         if (!validPassword) {
@@ -119,7 +123,7 @@ export const changePassword = async (req, res) => {
         }
 
         const hashedPassword = await bcrypt.hash(newPassword, 10);
-        db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashedPassword, req.user.id);
+        await db.run('UPDATE users SET password = ? WHERE id = ?', [hashedPassword, req.user.id]);
 
         res.json({ message: 'Password changed successfully' });
     } catch (error) {

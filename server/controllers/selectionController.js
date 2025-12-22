@@ -2,7 +2,7 @@ import db from '../models/database.js';
 import { broadcast } from '../index.js';
 
 // Toggle photo selection
-export const toggleSelection = (req, res) => {
+export const toggleSelection = async (req, res) => {
     try {
         const { photo_id, gallery_id, client_identifier } = req.body;
 
@@ -11,17 +11,13 @@ export const toggleSelection = (req, res) => {
         }
 
         // Check if selection exists
-        const existing = db.prepare(`
-      SELECT * FROM selections WHERE photo_id = ? AND client_identifier = ?
-    `).get(photo_id, client_identifier);
+        const existing = await db.get('SELECT * FROM selections WHERE photo_id = ? AND client_identifier = ?', [photo_id, client_identifier]);
 
         if (existing) {
             // Remove selection
-            db.prepare('DELETE FROM selections WHERE id = ?').run(existing.id);
+            await db.run('DELETE FROM selections WHERE id = ?', [existing.id]);
 
-            const count = db.prepare(`
-        SELECT COUNT(*) as count FROM selections WHERE gallery_id = ? AND client_identifier = ?
-      `).get(gallery_id, client_identifier);
+            const count = await db.get('SELECT COUNT(*) as count FROM selections WHERE gallery_id = ? AND client_identifier = ?', [gallery_id, client_identifier]);
 
             res.json({
                 selected: false,
@@ -30,21 +26,19 @@ export const toggleSelection = (req, res) => {
             });
         } else {
             // Add selection
-            db.prepare(`
+            await db.run(`
         INSERT INTO selections (photo_id, gallery_id, client_identifier, status)
         VALUES (?, ?, ?, 'pending')
-      `).run(photo_id, gallery_id, client_identifier);
+      `, [photo_id, gallery_id, client_identifier]);
 
-            const count = db.prepare(`
-        SELECT COUNT(*) as count FROM selections WHERE gallery_id = ? AND client_identifier = ?
-      `).get(gallery_id, client_identifier);
+            const count = await db.get('SELECT COUNT(*) as count FROM selections WHERE gallery_id = ? AND client_identifier = ?', [gallery_id, client_identifier]);
 
             // Create notification
-            const photo = db.prepare('SELECT original_name FROM photos WHERE id = ?').get(photo_id);
-            db.prepare(`
+            const photo = await db.get('SELECT original_name FROM photos WHERE id = ?', [photo_id]);
+            await db.run(`
         INSERT INTO notifications (gallery_id, type, message, data)
         VALUES (?, 'selection', ?, ?)
-      `).run(gallery_id, `Photo selected: ${photo.original_name}`, JSON.stringify({ photo_id, client_identifier }));
+      `, [gallery_id, `Photo selected: ${photo.original_name}`, JSON.stringify({ photo_id, client_identifier })]);
 
             // Broadcast to admin
             broadcast(gallery_id, { type: 'selection', photo_id, client_identifier, action: 'add' });
@@ -62,28 +56,42 @@ export const toggleSelection = (req, res) => {
 };
 
 // Select all photos
-export const selectAll = (req, res) => {
+export const selectAll = async (req, res) => {
     try {
         const { gallery_id, client_identifier } = req.body;
 
-        const photos = db.prepare('SELECT id FROM photos WHERE gallery_id = ?').all(gallery_id);
+        const photos = await db.query('SELECT id FROM photos WHERE gallery_id = ?', [gallery_id]);
 
         for (const photo of photos) {
-            db.prepare(`
-        INSERT OR IGNORE INTO selections (photo_id, gallery_id, client_identifier, status)
-        VALUES (?, ?, ?, 'pending')
-      `).run(photo.id, gallery_id, client_identifier);
+            // Postgres supports ON CONFLICT DO NOTHING, SQLite supports INSERT OR IGNORE
+            // We need to handle this difference or use a try/catch or check existence
+            // For simplicity, we'll check existence first or use a generic approach
+            // But db.js doesn't abstract SQL syntax.
+            // Let's try to use standard SQL if possible.
+            // SQLite: INSERT OR IGNORE
+            // Postgres: INSERT ... ON CONFLICT DO NOTHING
+
+            if (db.isPostgres) {
+                await db.run(`
+                    INSERT INTO selections (photo_id, gallery_id, client_identifier, status)
+                    VALUES (?, ?, ?, 'pending')
+                    ON CONFLICT (photo_id, client_identifier) DO NOTHING
+                `, [photo.id, gallery_id, client_identifier]);
+            } else {
+                await db.run(`
+                    INSERT OR IGNORE INTO selections (photo_id, gallery_id, client_identifier, status)
+                    VALUES (?, ?, ?, 'pending')
+                `, [photo.id, gallery_id, client_identifier]);
+            }
         }
 
-        const count = db.prepare(`
-      SELECT COUNT(*) as count FROM selections WHERE gallery_id = ? AND client_identifier = ?
-    `).get(gallery_id, client_identifier);
+        const count = await db.get('SELECT COUNT(*) as count FROM selections WHERE gallery_id = ? AND client_identifier = ?', [gallery_id, client_identifier]);
 
         // Create notification
-        db.prepare(`
+        await db.run(`
       INSERT INTO notifications (gallery_id, type, message, data)
       VALUES (?, 'selection', ?, ?)
-    `).run(gallery_id, `All ${photos.length} photos selected`, JSON.stringify({ client_identifier }));
+    `, [gallery_id, `All ${photos.length} photos selected`, JSON.stringify({ client_identifier })]);
 
         broadcast(gallery_id, { type: 'select_all', client_identifier, count: photos.length });
 
@@ -95,13 +103,11 @@ export const selectAll = (req, res) => {
 };
 
 // Deselect all photos
-export const deselectAll = (req, res) => {
+export const deselectAll = async (req, res) => {
     try {
         const { gallery_id, client_identifier } = req.body;
 
-        db.prepare(`
-      DELETE FROM selections WHERE gallery_id = ? AND client_identifier = ?
-    `).run(gallery_id, client_identifier);
+        await db.run('DELETE FROM selections WHERE gallery_id = ? AND client_identifier = ?', [gallery_id, client_identifier]);
 
         broadcast(gallery_id, { type: 'deselect_all', client_identifier });
 
@@ -113,16 +119,16 @@ export const deselectAll = (req, res) => {
 };
 
 // Get selections for a gallery (client)
-export const getSelections = (req, res) => {
+export const getSelections = async (req, res) => {
     try {
         const { gallery_id, client_identifier } = req.query;
 
-        const selections = db.prepare(`
+        const selections = await db.query(`
       SELECT s.*, p.filename, p.thumbnail_path, p.original_name
       FROM selections s
       JOIN photos p ON s.photo_id = p.id
       WHERE s.gallery_id = ? AND s.client_identifier = ?
-    `).all(gallery_id, client_identifier);
+    `, [gallery_id, client_identifier]);
 
         res.json({ selections, count: selections.length });
     } catch (error) {
@@ -132,21 +138,21 @@ export const getSelections = (req, res) => {
 };
 
 // Approve selection (admin)
-export const approveSelection = (req, res) => {
+export const approveSelection = async (req, res) => {
     try {
         const { id } = req.params;
 
-        const selection = db.prepare(`
+        const selection = await db.get(`
       SELECT s.* FROM selections s
       JOIN galleries g ON s.gallery_id = g.id
       WHERE s.id = ? AND g.admin_id = ?
-    `).get(id, req.user.id);
+    `, [id, req.user.id]);
 
         if (!selection) {
             return res.status(404).json({ error: 'Selection not found' });
         }
 
-        db.prepare('UPDATE selections SET status = ? WHERE id = ?').run('approved', id);
+        await db.run('UPDATE selections SET status = ? WHERE id = ?', ['approved', id]);
 
         res.json({ message: 'Selection approved' });
     } catch (error) {
@@ -156,21 +162,21 @@ export const approveSelection = (req, res) => {
 };
 
 // Reject selection (admin)
-export const rejectSelection = (req, res) => {
+export const rejectSelection = async (req, res) => {
     try {
         const { id } = req.params;
 
-        const selection = db.prepare(`
+        const selection = await db.get(`
       SELECT s.* FROM selections s
       JOIN galleries g ON s.gallery_id = g.id
       WHERE s.id = ? AND g.admin_id = ?
-    `).get(id, req.user.id);
+    `, [id, req.user.id]);
 
         if (!selection) {
             return res.status(404).json({ error: 'Selection not found' });
         }
 
-        db.prepare('UPDATE selections SET status = ? WHERE id = ?').run('rejected', id);
+        await db.run('UPDATE selections SET status = ? WHERE id = ?', ['rejected', id]);
 
         res.json({ message: 'Selection rejected' });
     } catch (error) {
@@ -180,7 +186,7 @@ export const rejectSelection = (req, res) => {
 };
 
 // Bulk approve selections (admin)
-export const bulkApprove = (req, res) => {
+export const bulkApprove = async (req, res) => {
     try {
         const { selection_ids } = req.body;
 
@@ -189,10 +195,10 @@ export const bulkApprove = (req, res) => {
         }
 
         const placeholders = selection_ids.map(() => '?').join(',');
-        db.prepare(`
+        await db.run(`
       UPDATE selections SET status = 'approved' 
       WHERE id IN (${placeholders})
-    `).run(...selection_ids);
+    `, selection_ids);
 
         res.json({ message: `${selection_ids.length} selections approved` });
     } catch (error) {
@@ -202,7 +208,7 @@ export const bulkApprove = (req, res) => {
 };
 
 // Bulk reject selections (admin)
-export const bulkReject = (req, res) => {
+export const bulkReject = async (req, res) => {
     try {
         const { selection_ids } = req.body;
 
@@ -211,10 +217,10 @@ export const bulkReject = (req, res) => {
         }
 
         const placeholders = selection_ids.map(() => '?').join(',');
-        db.prepare(`
+        await db.run(`
       UPDATE selections SET status = 'rejected' 
       WHERE id IN (${placeholders})
-    `).run(...selection_ids);
+    `, selection_ids);
 
         res.json({ message: `${selection_ids.length} selections rejected` });
     } catch (error) {
@@ -224,24 +230,23 @@ export const bulkReject = (req, res) => {
 };
 
 // Get all selections for a gallery (admin)
-export const getGallerySelections = (req, res) => {
+export const getGallerySelections = async (req, res) => {
     try {
         const { gallery_id } = req.params;
 
-        const gallery = db.prepare('SELECT * FROM galleries WHERE id = ? AND admin_id = ?')
-            .get(gallery_id, req.user.id);
+        const gallery = await db.get('SELECT * FROM galleries WHERE id = ? AND admin_id = ?', [gallery_id, req.user.id]);
 
         if (!gallery) {
             return res.status(404).json({ error: 'Gallery not found' });
         }
 
-        const selections = db.prepare(`
+        const selections = await db.query(`
       SELECT s.*, p.filename, p.thumbnail_path, p.original_name
       FROM selections s
       JOIN photos p ON s.photo_id = p.id
       WHERE s.gallery_id = ?
       ORDER BY s.created_at DESC
-    `).all(gallery_id);
+    `, [gallery_id]);
 
         // Group by client
         const grouped = selections.reduce((acc, sel) => {
@@ -260,29 +265,27 @@ export const getGallerySelections = (req, res) => {
 };
 
 // Toggle favorite
-export const toggleFavorite = (req, res) => {
+export const toggleFavorite = async (req, res) => {
     try {
         const { photo_id, gallery_id, client_identifier } = req.body;
 
-        const existing = db.prepare(`
-      SELECT * FROM favorites WHERE photo_id = ? AND client_identifier = ?
-    `).get(photo_id, client_identifier);
+        const existing = await db.get('SELECT * FROM favorites WHERE photo_id = ? AND client_identifier = ?', [photo_id, client_identifier]);
 
         if (existing) {
-            db.prepare('DELETE FROM favorites WHERE id = ?').run(existing.id);
+            await db.run('DELETE FROM favorites WHERE id = ?', [existing.id]);
             res.json({ favorited: false, message: 'Removed from favorites' });
         } else {
-            db.prepare(`
+            await db.run(`
         INSERT INTO favorites (photo_id, gallery_id, client_identifier)
         VALUES (?, ?, ?)
-      `).run(photo_id, gallery_id, client_identifier);
+      `, [photo_id, gallery_id, client_identifier]);
 
             // Create notification
-            const photo = db.prepare('SELECT original_name FROM photos WHERE id = ?').get(photo_id);
-            db.prepare(`
+            const photo = await db.get('SELECT original_name FROM photos WHERE id = ?', [photo_id]);
+            await db.run(`
         INSERT INTO notifications (gallery_id, type, message, data)
         VALUES (?, 'favorite', ?, ?)
-      `).run(gallery_id, `Photo favorited: ${photo.original_name}`, JSON.stringify({ photo_id, client_identifier }));
+      `, [gallery_id, `Photo favorited: ${photo.original_name}`, JSON.stringify({ photo_id, client_identifier })]);
 
             broadcast(gallery_id, { type: 'favorite', photo_id, client_identifier });
 
@@ -295,16 +298,16 @@ export const toggleFavorite = (req, res) => {
 };
 
 // Get favorites (client)
-export const getFavorites = (req, res) => {
+export const getFavorites = async (req, res) => {
     try {
         const { gallery_id, client_identifier } = req.query;
 
-        const favorites = db.prepare(`
+        const favorites = await db.query(`
       SELECT f.*, p.filename, p.thumbnail_path, p.original_name
       FROM favorites f
       JOIN photos p ON f.photo_id = p.id
       WHERE f.gallery_id = ? AND f.client_identifier = ?
-    `).all(gallery_id, client_identifier);
+    `, [gallery_id, client_identifier]);
 
         res.json({ favorites, count: favorites.length });
     } catch (error) {

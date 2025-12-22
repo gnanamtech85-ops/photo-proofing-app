@@ -7,12 +7,12 @@ export const getGalleryByLink = async (req, res) => {
         const { shareLink } = req.params;
         const { password, client_identifier } = req.query;
 
-        const gallery = db.prepare(`
+        const gallery = await db.get(`
       SELECT g.*, u.name as admin_name
       FROM galleries g
       JOIN users u ON g.admin_id = u.id
       WHERE g.share_link = ?
-    `).get(shareLink);
+    `, [shareLink]);
 
         if (!gallery) {
             return res.status(404).json({ error: 'Gallery not found' });
@@ -34,7 +34,7 @@ export const getGalleryByLink = async (req, res) => {
         }
 
         // Get photos with selection/favorite status for this client
-        const photos = db.prepare(`
+        const photos = await db.query(`
       SELECT p.*,
         CASE WHEN s.id IS NOT NULL THEN 1 ELSE 0 END as is_selected,
         s.status as selection_status,
@@ -44,23 +44,27 @@ export const getGalleryByLink = async (req, res) => {
       LEFT JOIN favorites f ON p.id = f.photo_id AND f.client_identifier = ?
       WHERE p.gallery_id = ?
       ORDER BY p.uploaded_at DESC
-    `).all(client_identifier || '', client_identifier || '', gallery.id);
+    `, [client_identifier || '', client_identifier || '', gallery.id]);
 
-        const folders = db.prepare('SELECT * FROM folders WHERE gallery_id = ?').all(gallery.id);
+        const folders = await db.query('SELECT * FROM folders WHERE gallery_id = ?', [gallery.id]);
 
         // Get selection count for this client
-        const selectionCount = db.prepare(`
+        const selectionCount = await db.get(`
       SELECT COUNT(*) as count FROM selections WHERE gallery_id = ? AND client_identifier = ?
-    `).get(gallery.id, client_identifier || '');
+    `, [gallery.id, client_identifier || '']);
 
         // Update or create gallery access record
         if (client_identifier) {
-            db.prepare(`
-        INSERT INTO gallery_access (gallery_id, client_identifier, last_accessed)
-        VALUES (?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(gallery_id, client_identifier) 
-        DO UPDATE SET last_accessed = CURRENT_TIMESTAMP
-      `).run(gallery.id, client_identifier);
+            // Postgres supports ON CONFLICT, SQLite supports INSERT OR IGNORE or ON CONFLICT
+            // Both support ON CONFLICT in modern versions.
+            // Let's assume standard SQL ON CONFLICT works for both (SQLite 3.24+)
+
+            await db.run(`
+                INSERT INTO gallery_access (gallery_id, client_identifier, last_accessed)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(gallery_id, client_identifier) 
+                DO UPDATE SET last_accessed = CURRENT_TIMESTAMP
+            `, [gallery.id, client_identifier]);
         }
 
         // Remove sensitive fields
@@ -90,7 +94,7 @@ export const clientUploadPhoto = async (req, res) => {
         const { shareLink } = req.params;
         const { client_identifier, client_name } = req.body;
 
-        const gallery = db.prepare('SELECT * FROM galleries WHERE share_link = ?').get(shareLink);
+        const gallery = await db.get('SELECT * FROM galleries WHERE share_link = ?', [shareLink]);
 
         if (!gallery) {
             return res.status(404).json({ error: 'Gallery not found' });
@@ -119,12 +123,12 @@ export const clientUploadPhoto = async (req, res) => {
 };
 
 // Get photo for download (check approval status)
-export const downloadPhoto = (req, res) => {
+export const downloadPhoto = async (req, res) => {
     try {
         const { shareLink, photoId } = req.params;
         const { client_identifier } = req.query;
 
-        const gallery = db.prepare('SELECT * FROM galleries WHERE share_link = ?').get(shareLink);
+        const gallery = await db.get('SELECT * FROM galleries WHERE share_link = ?', [shareLink]);
 
         if (!gallery) {
             return res.status(404).json({ error: 'Gallery not found' });
@@ -134,17 +138,16 @@ export const downloadPhoto = (req, res) => {
             return res.status(403).json({ error: 'Downloads not allowed for this gallery' });
         }
 
-        const photo = db.prepare('SELECT * FROM photos WHERE id = ? AND gallery_id = ?')
-            .get(photoId, gallery.id);
+        const photo = await db.get('SELECT * FROM photos WHERE id = ? AND gallery_id = ?', [photoId, gallery.id]);
 
         if (!photo) {
             return res.status(404).json({ error: 'Photo not found' });
         }
 
         // Check if selection is approved (if selections exist)
-        const selection = db.prepare(`
+        const selection = await db.get(`
       SELECT * FROM selections WHERE photo_id = ? AND client_identifier = ?
-    `).get(photoId, client_identifier);
+    `, [photoId, client_identifier]);
 
         if (selection && selection.status !== 'approved') {
             return res.status(403).json({
@@ -154,7 +157,14 @@ export const downloadPhoto = (req, res) => {
         }
 
         // Send the original file (not watermarked) for approved downloads
-        res.download(photo.original_path, photo.original_name);
+        // If Cloudinary, redirect to URL with attachment disposition?
+        // Or stream it?
+        // For simplicity, redirect to the URL.
+        if (photo.original_path.startsWith('http')) {
+            res.redirect(photo.original_path);
+        } else {
+            res.download(photo.original_path, photo.original_name);
+        }
     } catch (error) {
         console.error('Download error:', error);
         res.status(500).json({ error: 'Download failed' });
@@ -162,22 +172,22 @@ export const downloadPhoto = (req, res) => {
 };
 
 // Get notifications (admin)
-export const getNotifications = (req, res) => {
+export const getNotifications = async (req, res) => {
     try {
-        const notifications = db.prepare(`
+        const notifications = await db.query(`
       SELECT n.*, g.name as gallery_name
       FROM notifications n
       JOIN galleries g ON n.gallery_id = g.id
       WHERE g.admin_id = ?
       ORDER BY n.created_at DESC
       LIMIT 50
-    `).all(req.user.id);
+    `, [req.user.id]);
 
-        const unreadCount = db.prepare(`
+        const unreadCount = await db.get(`
       SELECT COUNT(*) as count FROM notifications n
       JOIN galleries g ON n.gallery_id = g.id
       WHERE g.admin_id = ? AND n.read = 0
-    `).get(req.user.id);
+    `, [req.user.id]);
 
         res.json({ notifications, unreadCount: unreadCount.count });
     } catch (error) {
@@ -187,11 +197,11 @@ export const getNotifications = (req, res) => {
 };
 
 // Mark notification as read
-export const markNotificationRead = (req, res) => {
+export const markNotificationRead = async (req, res) => {
     try {
         const { id } = req.params;
 
-        db.prepare('UPDATE notifications SET read = 1 WHERE id = ?').run(id);
+        await db.run('UPDATE notifications SET read = 1 WHERE id = ?', [id]);
 
         res.json({ message: 'Notification marked as read' });
     } catch (error) {
@@ -201,12 +211,12 @@ export const markNotificationRead = (req, res) => {
 };
 
 // Mark all notifications as read
-export const markAllNotificationsRead = (req, res) => {
+export const markAllNotificationsRead = async (req, res) => {
     try {
-        db.prepare(`
+        await db.run(`
       UPDATE notifications SET read = 1 
       WHERE gallery_id IN (SELECT id FROM galleries WHERE admin_id = ?)
-    `).run(req.user.id);
+    `, [req.user.id]);
 
         res.json({ message: 'All notifications marked as read' });
     } catch (error) {
@@ -216,20 +226,19 @@ export const markAllNotificationsRead = (req, res) => {
 };
 
 // Get gallery access log (admin)
-export const getGalleryAccessLog = (req, res) => {
+export const getGalleryAccessLog = async (req, res) => {
     try {
         const { gallery_id } = req.params;
 
-        const gallery = db.prepare('SELECT * FROM galleries WHERE id = ? AND admin_id = ?')
-            .get(gallery_id, req.user.id);
+        const gallery = await db.get('SELECT * FROM galleries WHERE id = ? AND admin_id = ?', [gallery_id, req.user.id]);
 
         if (!gallery) {
             return res.status(404).json({ error: 'Gallery not found' });
         }
 
-        const accessLog = db.prepare(`
+        const accessLog = await db.query(`
       SELECT * FROM gallery_access WHERE gallery_id = ? ORDER BY last_accessed DESC
-    `).all(gallery_id);
+    `, [gallery_id]);
 
         res.json({ accessLog });
     } catch (error) {
