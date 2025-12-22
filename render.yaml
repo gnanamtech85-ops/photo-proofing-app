@@ -23,10 +23,6 @@ services:
           property: host
       - key: PORT
         value: 10000
-    disk:
-      name: data
-      mountPath: /opt/render/project/src/database
-      sizeGB: 1
 
   # Frontend
   - type: web
